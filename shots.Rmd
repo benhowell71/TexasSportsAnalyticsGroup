@@ -1,0 +1,406 @@
+---
+title: "LeBron James Passes to Catch-and-shoot 3PAs"
+author: "Ben Howell"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      fig.align = "center",
+                      fig.width = 8, 
+                      message = FALSE)
+```
+
+LeBron James is one of the best passers in the NBA right now, despite being a nominal "Small Forward". As he led the Los Angeles Lakers to the 2019-2020 NBA title, James set a career-high in assists per game (APG), dishing out a league-leading 10.2 APG. While the Lakers themselves aren't a huge 3-point shooting team, only making 35% of the 31.6 three-pointers that they took in the 19-20 season, 763 of those were catch-and-shoot threes from LeBron.
+
+This tracking data from PBP Stats has graciously been made available by Darryl Blackport on his [GitHub](https://github.com/dblackrun/datasets/tree/main/lebron_passes_to_3s). I'm going to take you through the data, show you how to manipulate it, and how to create some cool visualizations using R and RStudio. The code for this piece can be found [here](https://github.com/benhowell71/NBA_shots/blob/main/shots.Rmd).
+
+*********************************************
+
+Step one of any analysis in R is loading packages. For this process, we're using the `tidyverse` and `kableExtra` packages. These packages will allow us to put together visualizations; if we were interested in modeling something, like the chance of making a certain shot, we'd load in some of these other packages.
+
+```{r}
+#if you're starting from scratch, you can load these packages in with 'install.packages(PACKAGE)'
+
+#loading packages
+library(tidyverse)
+library(mgcv)
+#library(randomForest) not used
+#library(caret)
+library(kableExtra)
+library(nbastatR)
+```
+
+Next, we want to load in the data. Since the data is readily available on Darryl's GitHub page, we can just pull the data from there. I've also created a few other variables.
+
+* pct: a dummy variable so we can show the % of shots that went in at a certain location
+* pass_x and pass_y: changing a factor to a numeric variable so we can graph it
+* where: which side of the court a shot was taken on
+
+```{r, message=FALSE, echo=FALSE, results='hide'}
+shots <- read.csv("https://raw.githubusercontent.com/dblackrun/datasets/main/lebron_passes_to_3s/shots.csv") %>%
+  mutate(pct = ifelse(made == "True", 1, 0),
+         pass_x = as.numeric(as.character(pass_from_x)),
+         pass_y = as.numeric(as.character(pass_from_y)),
+         where = ifelse(x < 0, "Left", "Right"))
+
+id <- unique(shots$playerid)
+
+car <- players_careers(player_ids = id, modes = c("PerGame"))
+
+rm(df_dict_nba_players, dataPlayerCareerTotalsAllStarSeason, dataPlayerCareerTotalsCollegeSeason,
+   dataPlayerCareerTotalsPostSeason, dataPlayerSeasonRankingsPostSeason, dataPlayerSeasonRankingsRegularSeason,
+   dataPlayerSeasonTotalsAllStarSeason, dataPlayerSeasonTotalsCollegeSeason, dataPlayerSeasonTotalsPostSeason,
+   dataPlayerSeasonTotalsRegularSeason, df_nba_player_dict)
+
+car <- dataPlayerCareerTotalsRegularSeason %>%
+  dplyr::select(namePlayer, idPlayer, pctFG3) %>%
+  rename(playerid = idPlayer)
+
+shots <- right_join(shots, car, by = "playerid")
+```
+
+What follows here is the process of putting together a rendering of a basketball court. While we could view the data without the underlying court, it would be more difficult to interpret, especially when we look at the pass locations, which come from everywhere on the court. With the shots taken, we see a pretty clear pattern emerge in where the three-point line should be. What we've done is passed this to a new function, called `court`, which is hosted in our enviroment so we can use it whenever we need to.
+
+```{r}
+in_x <- c(-75, -75, 75, 75)
+in_y <- c(-35, 150, 150, -35)
+
+inner <- data.frame(in_x, in_y)
+
+court <- function(...) {
+  ggplot(...) +
+  geom_segment(aes(x = -215, xend = -215, y = -35, yend = 100)) +
+  geom_segment(aes(x = 215, xend = 215, y = -35, yend = 100)) +
+  geom_curve(aes(x = -215, xend = 215,
+                 y = 100, yend = 100), curvature = -0.66) +
+  geom_path(data = inner, aes(x = in_x, y = in_y)) +
+  geom_curve(aes(x = -65, xend = 65,
+                 y = 150, yend = 150),
+             curvature = 1, linetype = "dashed") +
+  geom_curve(aes(x = -65, xend = 65,
+                 y = 150, yend = 150),
+             curvature = -1) +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank())
+}
+```
+
+Now we're ready to start diving into our data.                       
+
+Here's a simple scatterplot of all the catch-and-shoot three-pointers that LeBron has initiated. That's a lot of shots! But we can't really see any patterns in what kinds of shots go in. However, I wasn't really expecting to find any pattern from the shot locations; this data is for a variety of Laker of players from the past season, so each comes with their own tendencies and three-point FG%. 
+
+```{r}
+shots %>%
+  court +
+  geom_point(aes(x = x, y = y, color = made)) +
+  labs(x = "Baseline", y = "Sideline",
+       title = "Shots off of LeBron Passes from 2019-2020") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+```
+
+But what about the locations from which LeBron is passing to these threes?               
+
+Here we're using a heatmap to indicate which locations LeBron passed the most from. I've also broken it down by whether the shot was made (True = Make, False = Miss), and a general idea of where the shot was (Corner3 or Arc3). Both of these variables were a part of the original dataset, though we are using the `pass_x` and `pass_y` variables that we created earlier for where the pass originated from.
+
+```{r}
+# not using the "court" function here because it gets hidden behind the heatmap
+# so I copied the inner workings of the function and added it on here
+
+shots %>%
+  ggplot() +
+  stat_density_2d(aes(x = pass_x, y = pass_y, fill = ..ndensity..),
+                      geom = "raster", contour = FALSE) +
+  scale_fill_distiller(palette = "RdYlBu", direction = -1) +
+  #scale_fill_gradient(low = "white", high = "red") +
+  labs(x = "Baseline", y = "Sideline",
+       title = "LeBron Passes to 3PA from 2019-2020",
+       fill = "Pass Frequency") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        panel.grid.minor = element_blank()) + 
+  facet_grid(cols = vars(made),
+             rows = vars(shottype)) +
+  geom_segment(aes(x = -215, xend = -215, y = -35, yend = 100)) +
+  geom_segment(aes(x = 215, xend = 215, y = -35, yend = 100)) +
+  geom_curve(aes(x = -215, xend = 215,
+                 y = 100, yend = 100), curvature = -0.66) +
+  geom_path(data = inner, aes(x = in_x, y = in_y)) +
+  geom_curve(aes(x = -65, xend = 65,
+                 y = 150, yend = 150),
+             curvature = 1, linetype = "dashed") +
+  geom_curve(aes(x = -65, xend = 65,
+                 y = 150, yend = 150),
+             curvature = -1) 
+```
+
+Now we're getting somewhere, with a pattern starting to appear in the location of LeBron's passes to certain types of shots. When he passes into a corner three, the pass is usually coming from the paint, likely as LeBron is posted up and surveying the offense and defense around him.                     
+
+Arc 3s have a different pattern, with most of the passes into Arc 3s coming closer to the three-point line. We also see that his successful passes come typically at the elbows, while passes from the top of the key are less successful. There are a myriad of reasons why this may occur, whether it's who is taking Arc 3s versus Corner 3s, the angle at which they receive the pass based on LeBron's position, or factors outside their control, such as the defense's positioning.                       
+
+We see here that the Lakers' players shot significantly better on Corner3 attempts than Arc3 attempts from LeBron, which is to be expected. Shots from the corner usually have a higher FG% than arc shots, partially due to being closer to the basket and having a better line of sight. 
+
+```{r}
+ovr <- shots %>%
+  group_by(shottype) %>%
+  count(made) %>% 
+  spread(made, n, fill = 0) %>%
+  mutate(Total = False + True,
+         pct = round((True / Total)*100, digits = 1)) %>%
+  dplyr::select(shottype, Total, pct)
+
+ovr %>%
+  knitr::kable(booktabs = TRUE, linesep = "", caption = "Shots from LeBron Passes",
+               col.names = c("Shot Type", "Total Shots", "Shooting%")) %>%
+  kable_styling(bootstrap_options =  c("striped", "hold_position", "scale_down"), font_size = 12,
+                position = "center", full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, font_size = 10)
+```
+
+```{r, echo=FALSE}
+# shots_count <- shots %>%
+#   group_by(playerid, namePlayer) %>%
+#   count()
+# 
+# shots_count %>%
+#   arrange(desc(n))
+# 
+# use <- shots_count %>%
+#   filter(n >= 100)
+```
+
+```{r, echo=FALSE}
+# Can We Predict Which Shots Are Made?
+
+# set.seed(2135)
+# 
+# split <- sample(nrow(shots), nrow(shots)*0.7)
+# train <- shots[split, ]
+# test <- shots[-split, ]
+# 
+# shot_mod <- randomForest(made ~ x + y + pass_x + pass_y +
+#                            shottype + wide_open + seconds_remaining_on_shot_clock, na.action = na.roughfix, data = train)
+# 
+# test$pred <- predict(shot_mod, newdata = test)
+# 
+# confusionMatrix(test$made, test$pred)
+# 
+# shots$pred <- predict(shot_mod, newdata = shots)
+# confusionMatrix(shots$made, shots$pred)
+# #now we're talking
+```
+
+That's great, but saying that corner threes are better than arc threes is not an earth-shattering realization. What can help an opponent game plan for the Lakers is knowing which players are dangerous three-point shooters from the corner, the arc, or not at all.
+
+```{r}
+table <- shots %>%
+  group_by(shottype, playerid, namePlayer) %>%
+  count(made) %>% 
+  spread(made, n, fill = 0) %>%
+  mutate(Total = False + True,
+         pct = round((True / Total)*100, digits = 1)) %>%
+  dplyr::select(playerid, shottype, Total, pct) %>%
+  arrange(desc(pct)) %>%
+  filter(Total >= 40)
+
+table %>%
+  knitr::kable(booktabs = TRUE, linesep = "", caption = "Shots off LeBron Passes",
+               col.names = c("Player", "PlayerID", "Shot Type", "Total Shots", "Shooting%")) %>%
+  kable_styling(bootstrap_options =  c("striped", "hold_position", "scale_down"), font_size = 12,
+                position = "center", full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, font_size = 10)
+```
+
+On 40 corner threes off of a LeBron pass, Kyle Kuzma shot 60% from deep, a huge step forward over his career average 3-pt% of 33.3%. We also see a much lower 31% 3-pt% on Arc3s, which gives us an actionable plan. If you're facing the Lakers with LeBron in the post, you want to force Kyle Kuzma up on the wing, so that he doesn't get easy corner three attempts. We can see this difference represented below on the heatmap of Kuzma's shots; there's more concentrated red in the corners while blue is much more prevalent on the wings.                  
+
+Forcing Kuzma onto the wings wouldn't be a winning strategy if that gave him the opportunity to drive to the basket, but that isn't a strength of Kuzma's. Throughout his career, Kuzma is averaging just 2.8 free-throw attempts per game; he's been most effective for LeBron as a spot-up shooter, so teams should force him out of the corner to limit the damage that he may do.              
+
+(Obviously, if you're game-planning for the Lakers, you're focused more on LeBron and Anthony Davis, but Kuzma made a good example here due to his Corner3 and Arc3 splits.)
+
+```{r}
+names <- table %>%
+  filter(pct > 40) %>%
+  dplyr::select(playerid, namePlayer)
+
+shots %>%
+  filter(playerid %in% names$playerid) %>%
+  court() +
+  stat_summary_hex(aes(x = x, y = y, z = pct), fun = mean, binwidth = c(20, 20)) +
+  labs(x = "Baseline", y = "Sideline",
+       title = "Shots off of LeBron Passes from 2018-2020",
+       subtitle = paste0("For ", names$namePlayer)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  scale_fill_gradient2(low = "blue", mid = "grey", midpoint = 0.35, high = "red") +
+  facet_grid(rows = vars(playerid))
+```
+
+*************************************
+
+# Predicting 3-pt FG%
+
+Now that we've explored the data and some insights from simple manipulation of the data, what if we wanted to predict how likely a shot was to go in? After all, as we saw with Kuzma, he shot 60% on corner threes, which is just not sustainable. What if we could put together an "expected" 3-pt% for Kuzma, based off of where he shot the ball from, where the pass came from, and other variables, such as how close the defense was?                 
+
+Good news! We can try something like that with the `shots` dataset.
+
+Every shot has a chance to go in, but not all shots are created equal. For example, Steph Curry taking a wide open corner 3 is very different from Javale McGee taking a contested 27-footer with a second left on the shot clock. The quality of the shooter also influences the probability of making the shot, so we'd want to account for that. With that in mind, here are the variables that we'll use to try and predict the probability of a shot being made.                             
+
+* `x` and `y`: *the location of the shot*
+* `pass_x` and `pass_y`: *where the pass came from*
+* `shottype`: *Corner3 or Arc3*
+* `wide_open`: *how close the defender was, designated by "true" or "false"*
+* `seconds_remaining_on_shot_clock`: *how much time was left on the shot clock*
+
+What we'll do is create an overall xShot% for every player, then we'll regress that xShot% to the player's career average 3-pt%. To do so, we're going to use a `Generalized Additive Model`, which is a great catch-all and excellent for instances where we have binary outcomes, like a make or a miss. In the past, I've used a `gam` to represent [swing probabilities](https://twitter.com/benhowell71/status/1341827808423800833?s=20) for baseball players.
+
+```{r}
+#using the mgcv package that we loaded earlier
+
+train <- shots %>%
+  dplyr::select(x, y, pass_x, pass_y, pct, shottype, wide_open, seconds_remaining_on_shot_clock, pctFG3)
+
+set.seed(2253)
+
+train2 <- slice_sample(train, prop = 0.75)
+
+shot_mod <- gam(pct ~ s(x, y) + s(pass_x, pass_y) + wide_open +
+                  seconds_remaining_on_shot_clock, family = "binomial", data = train2,
+                scale = 0) #using the 'binomial' family b/c we have an either or situation
+
+train$pred <- predict(shot_mod, newdata = train, type = "response") #response gives us the probability of each result
+```
+
+```{r, echo=FALSE}
+#summary(shot_mod)
+
+#plot(shot_mod)
+```
+
+We run the model, then apply it with the `predict` function in R. One note of caution: here, we selected 75% of our dataset to train this model, but tested it on the entirety of the `shots` file, which includes the 572 shots that we used to train the model. Normally, we'd like to take 70-75% of the model to train and then test on the other 25-30%. However, with just 763 data points, I opted to go this route so that we could see how the `xFG%` is represented on the court.
+
+Below I've plotted our `xFG%` metric on the court. Unsurprisingly, the reddest sections are on the corner, while the above the break threes have an `xFG%` around 25-30%. One note, the left corner is about average (35%), while the right corner is 40+%. I believe that is due to the small sample, and could be influenced by the players who were included in the dataset, even though the player name/identifier wasn't used as a variable.
+
+```{r}
+train %>%
+  court() +
+  stat_summary_hex(aes(x = x, y = y, z = pred), fun = mean, binwidth = c(20, 20)) +
+  labs(x = "Baseline", y = "Sideline",
+       title = "xFG% by Location") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  scale_fill_gradient2(low = "blue", mid = "grey", midpoint = 0.35, high = "red") +
+  facet_grid()
+```
+
+Bringing back our table from earlier and comparing it with our xFG%, we see the same pattern; Corner3 shots consistently rate higher than Arc3 shots. There's a little bit of variation between the sample FG% and xFG%, but not too much.
+
+```{r, echo=FALSE}
+ovr_x <- train %>%
+  group_by(shottype) %>%
+  summarise(x_pct = round(mean(pred, na.rm = TRUE)*100, digits = 1))
+
+ovr_shot <- right_join(ovr, ovr_x, by = "shottype")
+
+ovr_shot %>%  
+  knitr::kable(booktabs = TRUE, linesep = "", caption = "xFG% by Shot Type",
+               col.names = c("Shot Type", "Total", "Sample FG%", "xFG%")) %>%
+  kable_styling(bootstrap_options =  c("striped", "hold_position", "scale_down"), font_size = 12,
+                position = "center", full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, font_size = 14)
+```
+
+What we're really interested in is who over-performed and who under-performed by xFG% (Negative values indicate bad luck and positive values indicate good luck between the player's Sample 3P% and their x3P% which has been regressed to their Career 3P%).
+
+```{r, echo=FALSE}
+#danny green xFG%
+green <- train %>%
+  mutate(pctFG3 = subset(car, namePlayer == "Danny Green")$pctFG3, 
+         weighted_xFG = (0.5*pctFG3) + (0.5*pred)) %>%
+  summarise(x_pct = round(mean(pred, na.rm = TRUE)*100, digits = 1),
+            weighted_xFG = round(mean(weighted_xFG, na.rm = TRUE)*100, digits = 1),
+            actual_FG = round(mean(pct, na.rm = TRUE)*100, digits = 1)) %>%
+  mutate(Player = "Danny Green")
+
+kuz <- train %>%
+  mutate(pctFG3 = subset(car, namePlayer == "Kyle Kuzma")$pctFG3, 
+         weighted_xFG = (0.5*pctFG3) + (0.5*pred)) %>%
+  summarise(x_pct = round(mean(pred, na.rm = TRUE)*100, digits = 1),
+            weighted_xFG = round(mean(weighted_xFG, na.rm = TRUE)*100, digits = 1),
+            actual_FG = round(mean(pct, na.rm = TRUE)*100, digits = 1)) %>%
+  mutate(Player = "Kyle Kuzma")
+
+kcp <- train %>%
+  mutate(pctFG3 = subset(car, namePlayer == "Kentavious Caldwell-Pope")$pctFG3, 
+         weighted_xFG = (0.5*pctFG3) + (0.5*pred)) %>%
+  summarise(x_pct = round(mean(pred, na.rm = TRUE)*100, digits = 1),
+            weighted_xFG = round(mean(weighted_xFG, na.rm = TRUE)*100, digits = 1),
+            actual_FG = round(mean(pct, na.rm = TRUE)*100, digits = 1)) %>%
+  mutate(Player = "Kentavious Caldwell-Pope")
+
+ad <- train %>%
+  mutate(pctFG3 = subset(car, namePlayer == "Anthony Davis")$pctFG3, 
+         weighted_xFG = (0.5*pctFG3) + (0.5*pred)) %>%
+  summarise(x_pct = round(mean(pred, na.rm = TRUE)*100, digits = 1),
+            weighted_xFG = round(mean(weighted_xFG, na.rm = TRUE)*100, digits = 1),
+            actual_FG = round(mean(pct, na.rm = TRUE)*100, digits = 1)) %>%
+  mutate(Player = "Anthony Davis")
+
+caruso <- train %>%
+  mutate(pctFG3 = subset(car, namePlayer == "Alex Caruso")$pctFG3, 
+         weighted_xFG = (0.5*pctFG3) + (0.5*pred)) %>%
+  summarise(x_pct = round(mean(pred, na.rm = TRUE)*100, digits = 1),
+            weighted_xFG = round(mean(weighted_xFG, na.rm = TRUE)*100, digits = 1),
+            actual_FG = round(mean(pct, na.rm = TRUE)*100, digits = 1)) %>%
+  mutate(Player = "Alex Caruso")
+
+brad <- train %>%
+  mutate(pctFG3 = subset(car, namePlayer == "Avery Bradley")$pctFG3, 
+         weighted_xFG = (0.5*pctFG3) + (0.5*pred)) %>%
+  summarise(x_pct = round(mean(pred, na.rm = TRUE)*100, digits = 1),
+            weighted_xFG = round(mean(weighted_xFG, na.rm = TRUE)*100, digits = 1),
+            actual_FG = round(mean(pct, na.rm = TRUE)*100, digits = 1)) %>%
+  mutate(Player = "Avery Bradley")
+
+all <- rbind(green, caruso, brad, kuz, ad, kcp)
+
+car <- car %>%
+  rename("Player" = "namePlayer")
+
+all <- right_join(all, car, by = "Player") %>%
+  filter(! is.na(x_pct)) %>%
+  dplyr::select(Player, pctFG3, x_pct, actual_FG, weighted_xFG)
+
+shot_list <- shots %>%
+  group_by(namePlayer) %>%
+  filter(namePlayer %in% all$Player) %>%
+  summarise(sample_pct = round(mean(pct, na.rm = TRUE)*100, digits = 1))  %>%
+  rename("Player" = "namePlayer")
+
+all <- right_join(all, shot_list, by = "Player") %>%
+  mutate(car_3pct  = round(pctFG3*100, digits = 1)) %>%
+  dplyr::select(-pctFG3)
+
+all_stat <- all %>%
+  dplyr::select(Player, car_3pct, sample_pct, weighted_xFG) %>%
+  mutate(diff = sample_pct - weighted_xFG)
+
+all_stat %>%
+  knitr::kable(booktabs = TRUE, linesep = "", caption = "Player xFG and Actual Comparison",
+               col.names = c("Player", "Career 3P%", "Sample 3P%",
+                             "x3P%", "Differemce")) %>%
+  kable_styling(bootstrap_options =  c("striped", "hold_position", "scale_down"), font_size = 12,
+                position = "center", full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, font_size = 14)
+```
+
+A few names pop out. Alex Caruso had extremely poor luck on passes from LeBron, with a Sample 3P% of just `r subset(all_stat, Player == "Alex Caruso")$sample_pct`, and an x3P% of `r subset(all_stat, Player == "Alex Caruso")$weighted_xFG`. That's a difference of `r subset(all_stat, Player == "Alex Caruso")$diff`.                  
+
+Kyle Kuzma, who we talked about earlier, had just as large of a swing, though he was the beneficiary of good luck. He posted a difference of `r subset(all_stat, Player == "Kyle Kuzma")$diff` between his Sample 3P% of `r subset(all_stat, Player == "Kyle Kuzma")$sample_pct` and x3P% of `r subset(all_stat, Player == "Kyle Kuzma")$weighted_xFG`.                 
+
+This could potentially be a sign that playing with LeBron elevated Kuzma's level of play while hurting Caruso's, but we'd need more data to draw such a conclusion.         
+
+This was a fun project, and a good way to get started with NBA shot tracking data. You can find the code to this piece [here](https://github.com/benhowell71/NBA_shots/blob/main/shots.Rmd).
